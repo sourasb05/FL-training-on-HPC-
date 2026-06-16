@@ -1,0 +1,21 @@
+Bootstrap: docker
+From: nvidia/cuda:12.1.0-cudnn8-devel-ubuntu22.04
+
+%post
+    apt-get update -y && apt-get install -y --no-install-recommends \
+        python3-pip python3-dev git wget && \
+    rm -rf /var/lib/apt/lists/*
+
+    pip3 install --no-cache-dir \
+        torch==2.1.0+cu121 torchvision==0.16.0+cu121 \
+        --extra-index-url https://download.pytorch.org/whl/cu121
+
+    pip3 install --no-cache-dir "numpy<2" matplotlib pandas
+
+%environment
+    export PYTHONUNBUFFERED=1
+
+%labels
+    Description "FL demo environment - all scripts"
+    PyTorch 2.1.0
+    CUDA 12.1
