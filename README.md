@@ -1,16 +1,16 @@
 # Federated Learning Demo — CIFAR-10 / ResNet-18
 
-Federated Averaging (FedAvg) on CIFAR-10 with ResNet-18, progressing from a naive single-GPU baseline to a VRAM-optimised single-GPU version, then to a multi-GPU parallel implementation.
+Federated Averaging (FedAvg) on CIFAR-10 with ResNet-18, progressing from a naive single-GPU baseline to a VRAM-flat single-GPU version, then to a multi-GPU parallel implementation with aggressive VRAM teardown.
 
 ---
 
 ## Overview
 
-| Script | Mode | GPUs | VRAM strategy |
+| Script | Mode | GPUs | VRAM Strategy |
 |---|---|---|---|
-| `fl_sequential_cifar.py` | Single-GPU naive | 1 | All client models stay on GPU simultaneously |
-| `fl_sequential_cifar_vram_opt.py` | Single-GPU optimised | 1 | One client on GPU at a time; offload after each |
-| `fl_multigpu_vram_opt.py` | Multi-GPU optimised | N | Clients distributed across GPUs; offload after each |
+| `fl_sequential_cifar.py` | Naive single-GPU | 1 | All client models stay on GPU simultaneously — OOM at scale |
+| `fl_sequential_cifar_vram_flat.py` | VRAM-flat single-GPU | 1 | Aggressive 6-step teardown — flat nvidia-smi baseline between clients |
+| `fl_multigpu_vram_flat.py` | VRAM-flat multi-GPU | N | Clients distributed across GPUs; 6-step teardown after each client |
 
 ---
 
@@ -32,7 +32,13 @@ CIFAR-10 (~170 MB) is downloaded automatically on first run into `./data/`.
 - All clients train sequentially on one GPU
 - After each client finishes, its model **stays on GPU** until all clients complete the round
 - FedAvg aggregation happens on GPU with all client models loaded simultaneously
-- **Problem:** VRAM grows linearly with number of clients — OOM at scale (400+ clients on a 46 GB GPU)
+- **Problem:** VRAM grows linearly with number of clients — OOM beyond ~5 clients on a 46 GB GPU
+
+### Why it fails at scale
+
+- All N client models resident on GPU simultaneously → peak VRAM = global model + N × local model
+- Gradient buffers and optimizer momentum never freed between clients
+- No `empty_cache()` → CUDA driver never releases blocks during the round
 
 ### Key parameters
 
@@ -49,8 +55,6 @@ BATCH_SIZE   = 128
 sbatch run_fl_sequential_cifar.sh
 ```
 
-SLURM settings in `run_fl_sequential_cifar.sh`:
-
 ```bash
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
@@ -59,26 +63,36 @@ SLURM settings in `run_fl_sequential_cifar.sh`:
 #SBATCH --time=2:00:00
 ```
 
-Monitor the job:
-
-```bash
-tail -f fl_cifar_<job_id>.out
-```
-
 ---
 
-## Step 2 — Optimised Single-GPU (`fl_sequential_cifar_vram_opt.py`)
+## Step 2 — VRAM-Flat Single-GPU (`fl_sequential_cifar_vram_flat.py`)
 
 ### What it does
 
-- Clients still train sequentially on one GPU
-- After each client finishes:
-  1. Weights are copied to CPU (`deepcopy(model.state_dict())`)
-  2. Model is moved off GPU (`model.cpu()`)
-  3. VRAM is freed immediately (`torch.cuda.empty_cache()`)
-- Only **one client model** lives on GPU at any time
-- FedAvg aggregation runs entirely on CPU
-- **Result:** Peak VRAM = global model + 1 local model, regardless of client count — scales to 600+ clients
+- Same sequential training as Step 2 but with an aggressive 6-step VRAM teardown after every client
+- Ensures `nvidia-smi` shows a **flat baseline** between clients, not just a reset at round boundaries
+
+### 6-step teardown after each client
+
+```python
+opt.zero_grad(set_to_none=True)                               # 1. free .grad buffers on GPU
+weights = {k: v.cpu().clone() for k, v in model.state_dict().items()}  # 2. explicit CPU snapshot
+del opt, criterion                                            # 3. free SGD momentum buffers
+model.cpu()                                                   # 4. move model off GPU
+torch.cuda.synchronize()                                      # 5. wait for async D2H transfers
+torch.cuda.empty_cache()                                      # 6. release blocks to CUDA driver
+```
+
+### Why each step matters
+
+| Step | What it frees |
+|------|--------------|
+| `zero_grad(set_to_none=True)` | Deallocates `.grad` buffers — not just zeroed in-place |
+| `{k: v.cpu().clone()}` | Avoids temporary GPU copies that linger during `deepcopy` |
+| `del opt, criterion` | SGD momentum buffers freed before `model.cpu()` |
+| `model.cpu()` | Model parameters and buffers moved off GPU |
+| `synchronize()` | Waits for async D2H transfers — without this, `empty_cache()` sees in-flight blocks |
+| `empty_cache()` | Releases all freed blocks back to the CUDA driver immediately |
 
 ### Key parameters
 
@@ -92,10 +106,8 @@ BATCH_SIZE   = 128
 ### Run on cluster (SLURM)
 
 ```bash
-sbatch run_fl_sequential_cifar_vram_opt.sh
+sbatch run_fl_sequential_cifar_vram_flat.sh
 ```
-
-SLURM settings in `run_fl_sequential_cifar_vram_opt.sh`:
 
 ```bash
 #SBATCH --ntasks=1
@@ -105,39 +117,37 @@ SLURM settings in `run_fl_sequential_cifar_vram_opt.sh`:
 #SBATCH --time=2:00:00
 ```
 
-Monitor the job:
-
-```bash
-tail -f fl_cifar_vram_opt_<job_id>.out
-```
-
 ---
 
-## Step 3 — Multi-GPU Optimised (`fl_multigpu_vram_opt.py`)
+## Step 3 — VRAM-Flat Multi-GPU (`fl_multigpu_vram_flat.py`)
 
 ### What it does
 
 - Spawns one worker process per GPU using `torch.multiprocessing`
-- Clients are distributed **round-robin** across all GPUs (e.g., 10 clients across 5 GPUs = 2 clients/GPU)
-- Each GPU worker trains its assigned clients **sequentially with VRAM offload** (same as Step 2)
-- All GPU workers run **in parallel**, so wall time per round = slowest GPU worker
+- Clients distributed **round-robin** across GPUs
+- Each GPU worker trains its assigned clients **sequentially** with the same 6-step VRAM teardown as Step 3
+- All GPU workers run **in parallel** — wall time per round = slowest GPU worker
 - Global model and FedAvg aggregation live entirely on CPU
-- Communication via `mp.Queue`: server sends model bytes to workers; workers return CPU state_dicts
+- Communication via `mp.Queue`: server serializes model to bytes → workers deserialize and train → return CPU weights as bytes
 
 ### Architecture
 
 ```
-Main process (server)
+Main process (server — CPU)
   ├── global model on CPU
   ├── FedAvg aggregation on CPU
-  ├── evaluation on GPU 0
-  └── spawns N GPU worker processes
-        ├── GPU 0 worker → trains clients 0, 5  (sequential + VRAM offload)
-        ├── GPU 1 worker → trains clients 1, 6
-        ├── GPU 2 worker → trains clients 2, 7
-        ├── GPU 3 worker → trains clients 3, 8
-        └── GPU 4 worker → trains clients 4, 9
+  ├── evaluation on GPU 0 (then moved back to CPU)
+  └── spawns M GPU worker processes
+        ├── GPU 0 worker → trains clients [0, 2, 4, ...] sequentially + 6-step teardown
+        └── GPU 1 worker → trains clients [1, 3, 5, ...] sequentially + 6-step teardown
 ```
+
+### Key implementation details
+
+- **`mp.Process`** — true parallelism across GPUs (not threads, which are blocked by Python's GIL)
+- **`state_to_bytes()` / `bytes_to_state()`** — GPU tensors cannot cross process boundaries directly; serialization is required
+- **`torch.cuda.set_device(device)`** — pins each worker to its assigned GPU
+- **Round-robin assignment** — static; GPU with more/heavier clients determines round time
 
 ### Key parameters
 
@@ -151,36 +161,32 @@ BATCH_SIZE   = 128
 ### Run on cluster (SLURM)
 
 ```bash
-sbatch run_fl_multigpu_vram_opt.sh
+sbatch run_fl_multigpu_vram_flat.sh
 ```
-
-SLURM settings in `run_fl_multigpu_vram_opt.sh`:
 
 ```bash
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=12   # 5 GPU workers × 2 DataLoader workers + server + headroom
-#SBATCH --gres=gpu:5
-#SBATCH --mem=16G
-#SBATCH --time=4:00:00
+#SBATCH --cpus-per-task=6    # 2 GPUs × 2 DataLoader workers + server overhead
+#SBATCH --gres=gpu:2
+#SBATCH --mem=64G
+#SBATCH --time=1:00:00
 ```
 
-Monitor the job:
+### Known limitation
 
-```bash
-tail -f fl_multigpu_vram_opt_<job_id>.out
-```
+Multi-GPU adds serialization overhead and inter-process communication cost. With small client counts (< ~20), sequential single-GPU is faster. Multi-GPU pays off when `num_clients >> num_gpus` and each client trains long enough to amortize the communication cost.
 
 ---
 
 ## GPU Memory Monitoring
 
-All SLURM scripts log GPU memory via `nvidia-smi` every 5 seconds into a CSV:
+All SLURM scripts log GPU memory via `nvidia-smi` every 5 seconds:
 
 ```
 gpu_mem_log_<job_id>.csv
 ```
 
-### Plot memory usage per GPU
+### Plot memory usage
 
 ```bash
 python plot_gpu_mem.py <job_id>
@@ -188,15 +194,9 @@ python plot_gpu_mem.py <job_id>
 
 Produces `gpu_mem_<job_id>.png` — one subplot per GPU showing used VRAM over time, peak, and total.
 
-Example:
-
-```bash
-python plot_gpu_mem.py 5920546
-```
-
 ---
 
-## SLURM commands
+## SLURM Commands
 
 ### Submit a job
 
@@ -229,16 +229,15 @@ tail -f fl_cifar_<job_id>.err
 ### Job details and resource usage
 
 ```bash
-scontrol show job <job_id>    # full job info (nodes, CPUs, GPUs, state)
+scontrol show job <job_id>
 sacct -j <job_id> --format=JobID,State,Elapsed,MaxRSS,ReqMem,AllocCPUS,AllocGRES
-                              # resource usage after job completes
 ```
 
 ### Check available GPU nodes
 
 ```bash
-sinfo -p gpu                  # partition state and availability
-sinfo -p gpu -o "%N %G %C %m" # nodes with GPU, CPU, memory info
+sinfo -p gpu
+sinfo -p gpu -o "%N %G %C %m"
 ```
 
 ### Interactive GPU session (for debugging)
