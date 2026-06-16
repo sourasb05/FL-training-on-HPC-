@@ -16,9 +16,19 @@ Federated Averaging (FedAvg) on CIFAR-10 with ResNet-18, progressing from a naiv
 
 ## Prerequisites
 
+This project uses **Apptainer** for reproducible environments instead of conda. The container image `fl_cifar.sif` packages all dependencies (PyTorch 2.1.0 + CUDA 12.1, torchvision, numpy<2, matplotlib, pandas) into a single portable file.
+
+### Build the container (once)
+
 ```bash
-conda activate myenv
-# packages required: torch, torchvision, numpy, matplotlib
+cd /gorilla/proj/cacs-rp/cacs-rp/souras/fl_demo
+apptainer build fl_cifar.sif fl_cifar.def
+```
+
+### Verify
+
+```bash
+apptainer exec fl_cifar.sif python3 -c "import torch, numpy; print(torch.__version__, numpy.__version__)"
 ```
 
 CIFAR-10 (~170 MB) is downloaded automatically on first run into `./data/`.
@@ -61,6 +71,11 @@ sbatch run_fl_sequential_cifar.sh
 #SBATCH --gres=gpu:1
 #SBATCH --mem=32G
 #SBATCH --time=2:00:00
+```
+
+The script runs inside the Apptainer container:
+```bash
+apptainer exec --nv --bind $WORKDIR:/workspace fl_cifar.sif python3 /workspace/fl_sequential_cifar.py
 ```
 
 ---
@@ -117,6 +132,11 @@ sbatch run_fl_sequential_cifar_vram_flat.sh
 #SBATCH --time=2:00:00
 ```
 
+The script runs inside the Apptainer container:
+```bash
+apptainer exec --nv --bind $WORKDIR:/workspace fl_cifar.sif python3 /workspace/fl_sequential_cifar_vram_flat.py
+```
+
 ---
 
 ## Step 3 — VRAM-Flat Multi-GPU (`fl_multigpu_vram_flat.py`)
@@ -170,6 +190,11 @@ sbatch run_fl_multigpu_vram_flat.sh
 #SBATCH --gres=gpu:2
 #SBATCH --mem=64G
 #SBATCH --time=1:00:00
+```
+
+The script runs inside the Apptainer container:
+```bash
+apptainer exec --nv --bind $WORKDIR:/workspace fl_cifar.sif python3 /workspace/fl_multigpu_vram_flat.py
 ```
 
 ### Known limitation
