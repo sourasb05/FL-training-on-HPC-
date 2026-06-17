@@ -27,12 +27,12 @@ def build_resnet18(num_classes=10):
 
 # ── Non-IID data split (Dirichlet distribution) ───────────────────────────────
 def non_iid_split(dataset, num_clients=5, alpha=0.5, seed=42):
-    rng = np.random.default_rng(seed)
-    labels = np.array(dataset.targets)
-    num_classes = len(np.unique(labels))
-    class_indices = [np.where(labels == c)[0] for c in range(num_classes)]
+    rng = np.random.default_rng(seed) # for reproducibility
+    labels = np.array(dataset.targets) # assumes dataset.targets is a list of labels; adjust if different
+    num_classes = len(np.unique(labels)) # e.g., 10 for CIFAR-10
+    class_indices = [np.where(labels == c)[0] for c in range(num_classes)] # list of arrays, [0]ensures array only not the entire tuple, each containing indices of samples for class c 
 
-    client_indices = [[] for _ in range(num_clients)]
+    client_indices = [[] for _ in range(num_clients)] # list of lists to hold indices for each client
     for c_idx in class_indices:
         proportions = rng.dirichlet(alpha * np.ones(num_clients))
         splits = (proportions * len(c_idx)).astype(int)
@@ -98,7 +98,7 @@ def evaluate(model, loader, device):
 # ── Main ──────────────────────────────────────────────────────────────────────
 def main():
     DEVICE       = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-    NUM_CLIENTS  = 400
+    NUM_CLIENTS  = 5
     NUM_ROUNDS   = 5
     LOCAL_EPOCHS = 5
     BATCH_SIZE   = 128

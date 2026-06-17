@@ -81,7 +81,7 @@ CIFAR-10 (~170 MB) is downloaded automatically on first run into `./data/`.
 - All clients train sequentially on one GPU
 - After each client finishes, its model **stays on GPU** until all clients complete the round
 - FedAvg aggregation happens on GPU with all client models loaded simultaneously
-- **Problem:** VRAM grows linearly with number of clients — OOM beyond ~5 clients on a 46 GB GPU
+- **Problem:** VRAM grows linearly with number of clients — OOM beyond ~499 clients on a 46 GB GPU
 
 ### Why it fails at scale
 
@@ -89,14 +89,6 @@ CIFAR-10 (~170 MB) is downloaded automatically on first run into `./data/`.
 - Gradient buffers and optimizer momentum never freed between clients
 - No `empty_cache()` → CUDA driver never releases blocks during the round
 
-### Key parameters
-
-```python
-NUM_CLIENTS  = 400
-NUM_ROUNDS   = 5
-LOCAL_EPOCHS = 5
-BATCH_SIZE   = 128
-```
 
 ### Run on cluster (SLURM)
 
