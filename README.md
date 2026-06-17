@@ -18,18 +18,57 @@ Federated Averaging (FedAvg) on CIFAR-10 with ResNet-18, progressing from a naiv
 
 This project uses **Apptainer** for reproducible environments instead of conda. The container image `fl_cifar.sif` packages all dependencies (PyTorch 2.1.0 + CUDA 12.1, torchvision, numpy<2, matplotlib, pandas) into a single portable file.
 
-### Build the container (once)
+### Step 1 — Check Apptainer is available
+
+```bash
+apptainer --version
+```
+
+If not found, load the module first:
+
+```bash
+module load apptainer
+```
+
+### Step 2 — Build the container (once)
 
 ```bash
 cd /gorilla/proj/cacs-rp/cacs-rp/souras/fl_demo
 apptainer build fl_cifar.sif fl_cifar.def
 ```
 
-### Verify
+Takes **5–15 minutes**. You'll see output like:
+```
+INFO:    Starting build...
+INFO:    Fetching OCI image...
+...
+Successfully installed torch-2.1.0+cu121 ...
+INFO:    Creating SIF file...
+INFO:    Build complete: fl_cifar.sif
+```
+
+Only rebuild if you change `fl_cifar.def` (e.g. add a new package).
+
+### Step 3 — Verify the build
 
 ```bash
 apptainer exec fl_cifar.sif python3 -c "import torch, numpy; print(torch.__version__, numpy.__version__)"
 ```
+
+Expected output:
+```
+2.1.0+cu121  1.26.4
+```
+
+### Step 6 — Submit your jobs
+
+```bash
+sbatch run_fl_sequential_cifar.sh
+sbatch run_fl_sequential_cifar_vram_flat.sh
+sbatch run_fl_multigpu_vram_flat.sh
+```
+
+All three scripts reuse the same `fl_cifar.sif`.
 
 CIFAR-10 (~170 MB) is downloaded automatically on first run into `./data/`.
 
